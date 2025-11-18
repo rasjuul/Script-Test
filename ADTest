@@ -1,0 +1,176 @@
+# Requires -RunAsAdministrator
+# Requires -Modules ActiveDirectory
+
+function Show-Menu {
+    Clear-Host
+    Write-Host "=== Brugeradministration i Active Directory ===" -ForegroundColor Cyan
+    Write-Host "1. Opret ny bruger"
+    Write-Host "2. Slet eksisterende bruger"
+    Write-Host "3. Vis aktive brugere"
+    Write-Host "4. Vis inaktive brugere"
+    Write-Host "5. Vis alle brugere"
+    Write-Host "6. Afslut"
+    Write-Host ""
+}
+
+function Read-UserInput {
+    $user = [PSCustomObject]@{
+        Fornavn     = Read-Host "Indtast fornavn"
+        Efternavn   = Read-Host "Indtast efternavn"
+        Brugernavn  = Read-Host "Indtast brugernavn (samAccountName)"
+        Adgangskode = Read-Host "Indtast midlertidig adgangskode" -AsSecureString
+        OUPath      = Read-Host "Indtast OU (f.eks. OU=Brugere,DC=domæne,DC=local)"
+        Grupper     = Read-Host "Indtast gruppe-navne separeret med komma (eller tryk Enter for ingen)"
+    }
+
+    return $user
+}
+
+function Create-ADUserFromInput {
+    param(
+        [Parameter(Mandatory)]
+        [pscustomobject]$UserInput
+    )
+
+    $navn = "$($UserInput.Fornavn) $($UserInput.Efternavn)"
+
+    Try {
+        New-ADUser `
+            -Name $navn `
+            -GivenName $UserInput.Fornavn `
+            -Surname $UserInput.Efternavn `
+            -SamAccountName $UserInput.Brugernavn `
+            -UserPrincipalName "$($UserInput.Brugernavn)@yourdomain.local" `
+            -AccountPassword $UserInput.Adgangskode `
+            -Path $UserInput.OUPath `
+            -Enabled $true `
+            -ChangePasswordAtLogon $true `
+            -PassThru | Out-Null
+
+        Write-Host "Bruger '$navn' blev oprettet." -ForegroundColor Green
+
+        if ($UserInput.Grupper -ne "") {
+            $grupper = $UserInput.Grupper -split ",\s*"
+            foreach ($gruppe in $grupper) {
+                Add-ADGroupMember -Identity $gruppe -Members $UserInput.Brugernavn -ErrorAction Stop
+                Write-Host "Tilføjet til gruppe: $gruppe" -ForegroundColor Yellow
+            }
+        }
+    }
+    Catch {
+        Write-Error "Fejl ved oprettelse: $_"
+    }
+}
+
+function Remove-ADUserInteractive {
+    $brugernavn = Read-Host "Indtast brugernavn (samAccountName) på den bruger, du vil slette"
+
+    Try {
+        $user = Get-ADUser -Identity $brugernavn -ErrorAction Stop
+
+        Write-Host "Fundet bruger: $($user.Name) ($brugernavn)" -ForegroundColor Yellow
+        $confirm = Read-Host "Er du sikker på, at du vil slette denne bruger? (J/N)"
+
+        if ($confirm -match '^[Jj]$') {
+            Remove-ADUser -Identity $brugernavn -Confirm:$false
+            Write-Host "Bruger '$brugernavn' er slettet." -ForegroundColor Green
+        }
+        else {
+            Write-Host "Sletning annulleret." -ForegroundColor Gray
+        }
+    }
+    Catch {
+        Write-Error "Bruger ikke fundet eller fejl: $_"
+    }
+}
+
+function Show-ADUsers {
+    param(
+        [ValidateSet("All", "Active", "Inactive")]
+        [string]$Type = "All"
+    )
+
+    $danishTimeZone = [System.TimeZoneInfo]::FindSystemTimeZoneById("Romance Standard Time")
+
+    Try {
+        switch ($Type) {
+            "All" {
+                $users = Get-ADUser -Filter * -Properties DisplayName, Enabled, LastLogonDate, PasswordLastSet
+                Write-Host "`n=== Alle Brugere i AD ===" -ForegroundColor Cyan
+            }
+            "Active" {
+                $users = Get-ADUser -Filter {Enabled -eq $true} -Properties DisplayName, Enabled, LastLogonDate, PasswordLastSet
+                Write-Host "`n=== Aktive Brugere ===" -ForegroundColor Green
+            }
+            "Inactive" {
+                $cutoff = (Get-Date).AddDays(-90)
+                $users = Get-ADUser -Filter {Enabled -eq $true -and LastLogonDate -lt $cutoff} -Properties DisplayName, Enabled, LastLogonDate, PasswordLastSet
+                Write-Host "`n=== Inaktive Brugere (90+ dage) ===" -ForegroundColor Yellow
+            }
+        }
+
+        if ($users.Count -eq 0) {
+            Write-Host "Ingen brugere fundet." -ForegroundColor DarkGray
+        }
+        else {
+            $users | Sort-Object Name | Select-Object `
+                Name,
+                SamAccountName,
+                Enabled,
+                @{Name='Sidst logget på'; Expression = {
+                    if ($_.LastLogonDate) {
+                        [System.TimeZoneInfo]::ConvertTimeFromUtc($_.LastLogonDate, $danishTimeZone).ToString("dd-MM-yyyy HH:mm:ss")
+                    } else {
+                        "Aldrig"
+                    }
+                }},
+                @{Name='Sidst ændret kode'; Expression = {
+                    if ($_.PasswordLastSet) {
+                        [System.TimeZoneInfo]::ConvertTimeFromUtc($_.PasswordLastSet, $danishTimeZone).ToString("dd-MM-yyyy HH:mm:ss")
+                    } else {
+                        "Ukendt"
+                    }
+                }} | Format-Table -AutoSize
+        }
+    }
+    Catch {
+        Write-Error "Fejl under hentning af brugere: $_"
+    }
+}
+
+do {
+    Show-Menu
+    $valg = Read-Host "Vælg en mulighed"
+
+    switch ($valg) {
+        "1" {
+            $input = Read-UserInput
+            Create-ADUserFromInput -UserInput $input
+            Pause
+        }
+        "2" {
+            Remove-ADUserInteractive
+            Pause
+        }
+        "3" {
+            Show-ADUsers -Type "Active"
+            Pause
+        }
+        "4" {
+            Show-ADUsers -Type "Inactive"
+            Pause
+        }
+        "5" {
+            Show-ADUsers -Type "All"
+            Pause
+        }
+        "6" {
+            Write-Host "Farvel." -ForegroundColor Cyan
+            break
+        }
+        Default {
+            Write-Host "Ugyldigt valg. Prøv igen." -ForegroundColor Red
+            Pause
+        }
+    }
+} while ($true)
